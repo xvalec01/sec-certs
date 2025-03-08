@@ -1,12 +1,12 @@
 from operator import itemgetter
-from pathlib import Path
 
 import sentry_sdk
-from flask import abort, current_app, render_template, request, send_file
+from flask import abort, current_app, render_template, request
 from flask_breadcrumbs import register_breadcrumb
 
 from .. import mongo, sitemap
 from ..common.objformats import load
+from ..common.views import send_cacheable_instance_file
 from . import vuln
 
 
@@ -18,27 +18,13 @@ def index():
 
 @vuln.route("/cve/cve.json")
 def cve_dset():
-    dset_path = Path(current_app.instance_path) / current_app.config["DATASET_PATH_CVE"]
-    if not dset_path.is_file():
-        return abort(404)
-    return send_file(
-        dset_path,
-        as_attachment=True,
-        mimetype="application/json",
-        download_name="cve.json",
-    )
+    return send_cacheable_instance_file(current_app.config["DATASET_PATH_CVE"], "application/json", "cve.json")
 
 
 @vuln.route("/cve/cve.json.gz")
 def cve_dset_gz():
-    dset_path = Path(current_app.instance_path) / current_app.config["DATASET_PATH_CVE_COMPRESSED"]
-    if not dset_path.is_file():
-        return abort(404)
-    return send_file(
-        dset_path,
-        as_attachment=True,
-        mimetype="application/json",
-        download_name="cve.json.gz",
+    return send_cacheable_instance_file(
+        current_app.config["DATASET_PATH_CVE_COMPRESSED"], "application/gzip", "cve.json.gz"
     )
 
 
@@ -67,7 +53,8 @@ def cve(cve_id):
     for vuln_cpe in cve_doc["vulnerable_cpes"]:
         match = matches.get(vuln_cpe["criteria_id"])
         if match:
-            vuln_configs.append((list(map(itemgetter("cpeName"), match["matches"])), []))
+            vuln_configs.append((True, list(map(itemgetter("cpeName"), match["matches"])), []))
+        # TODO: Maybe include it as well?
     for vuln_cfg in cve_doc["vulnerable_criteria_configurations"]:
         matches_first = []
         for crit in vuln_cfg["components"][0]:
@@ -80,8 +67,16 @@ def cve(cve_id):
                 match = matches.get(crit["criteria_id"])
                 if match:
                     matches_second.extend(list(map(itemgetter("cpeName"), match["matches"])))
-        vuln_configs.append((matches_first, matches_second))
+        if matches_first and matches_second:
+            vuln_configs.append((True, matches_first, matches_second))
+        else:
+            matches_first = list(map(itemgetter("criteria"), vuln_cfg["components"][0]))
+            matches_second = (
+                list(map(itemgetter("criteria"), vuln_cfg["components"][1])) if len(vuln_cfg["components"]) > 1 else []
+            )
+            vuln_configs.append((False, matches_first, matches_second))
 
+    vuln_configs.sort(key=lambda tup: (not tup[0], tup[1], tup[2]))
     with sentry_sdk.start_span(op="mongo", description="Find CC certs"):
         cc_certs = list(map(load, mongo.db.cc.find({"heuristics.related_cves._value": cve_id})))
     with sentry_sdk.start_span(op="mongo", description="Find FIPS certs"):
@@ -93,27 +88,15 @@ def cve(cve_id):
 
 @vuln.route("/cpe/cpe_match.json")
 def cpe_match_dset():
-    dset_path = Path(current_app.instance_path) / current_app.config["DATASET_PATH_CPE_MATCH"]
-    if not dset_path.is_file():
-        return abort(404)
-    return send_file(
-        dset_path,
-        as_attachment=True,
-        mimetype="application/json",
-        download_name="cpe_match.json",
+    return send_cacheable_instance_file(
+        current_app.config["DATASET_PATH_CPE_MATCH"], "application/json", "cpe_match.json"
     )
 
 
 @vuln.route("/cpe/cpe_match.json.gz")
 def cpe_match_dset_gz():
-    dset_path = Path(current_app.instance_path) / current_app.config["DATASET_PATH_CPE_MATCH_COMPRESSED"]
-    if not dset_path.is_file():
-        return abort(404)
-    return send_file(
-        dset_path,
-        as_attachment=True,
-        mimetype="application/json",
-        download_name="cpe_match.json.gz",
+    return send_cacheable_instance_file(
+        current_app.config["DATASET_PATH_CPE_MATCH_COMPRESSED"], "application/gzip", "cpe_match.json.gz"
     )
 
 
@@ -159,27 +142,13 @@ def cpe(cpe_id):
 
 @vuln.route("/cpe/cpe.json")
 def cpe_dset():
-    dset_path = Path(current_app.instance_path) / current_app.config["DATASET_PATH_CPE"]
-    if not dset_path.is_file():
-        return abort(404)
-    return send_file(
-        dset_path,
-        as_attachment=True,
-        mimetype="application/json",
-        download_name="cpe.json",
-    )
+    return send_cacheable_instance_file(current_app.config["DATASET_PATH_CPE"], "application/json", "cpe.json")
 
 
 @vuln.route("/cpe/cpe.json.gz")
 def cpe_dset_gz():
-    dset_path = Path(current_app.instance_path) / current_app.config["DATASET_PATH_CPE_COMPRESSED"]
-    if not dset_path.is_file():
-        return abort(404)
-    return send_file(
-        dset_path,
-        as_attachment=True,
-        mimetype="application/json",
-        download_name="cpe.json.gz",
+    return send_cacheable_instance_file(
+        current_app.config["DATASET_PATH_CPE_COMPRESSED"], "application/gzip", "cpe.json.gz"
     )
 
 
@@ -193,6 +162,6 @@ def sitemap_urls():
     yield "vuln.cpe_match_dset", {}
     yield "vuln.cpe_match_dset_gz", {}
     for doc in mongo.db.cve.find({}, {"_id": 1}):
-        yield "vuln.cve", {"cve_id": doc["_id"]}
+        yield "vuln.cve", {"cve_id": doc["_id"]}, None, None, 0.3
     for doc in mongo.db.cpe.find({}, {"_id": 1}):
-        yield "vuln.cpe", {"cpe_id": doc["_id"]}
+        yield "vuln.cpe", {"cpe_id": doc["_id"]}, None, None, 0.1

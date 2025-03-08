@@ -1,4 +1,4 @@
-{% extends "crowdsourced.html.jinja2" %}
+{% extends "common/crowdsourced.html.jinja2" %}
 {% set crumbs = True %}
 {% set search = False %}
 {% set canonical = True %}
@@ -19,6 +19,8 @@
     <meta property="og:image" content="{{ url_for("static", filename="img/cpe_card.png", _external=True) }}"/>
     <meta property="og:description" content="{{ cpe["_id"] }}"/>
     <meta property="og:site_name" content="sec-certs.org"/>
+    <meta name="description" content="{{ cpe["_id"] }}" />
+    <meta name="robots" content="noindex"/>
 {% endblock %}
 {% block navbar %}
     {{ super() }}
@@ -34,7 +36,7 @@
 {% endblock %}
 {% block content %}
     <main>
-        <div class="col-10 mx-auto p-3 py-md-5">
+        <div class="col-12 col-sm-10 mx-auto p-3 py-md-5">
             <div class="alert alert-warning d-sm-none" role="alert">
                 <i class="fas fa-exclamation-triangle"></i> This page was not yet optimized for use on mobile devices.
             </div>
@@ -118,7 +120,7 @@
             </div>
         </div>
         <div class="row bg-dark p-3">
-            <div class="col-10 mx-auto p-3 py-md-5 text-light">
+            <div class="col-12 col-sm-10 mx-auto p-3 py-md-5 text-light">
 
                 <div class="mb-3">
                     <h2 class="anchor" id="matched-certs">Matched certificates
@@ -149,7 +151,7 @@
                             <ul>
                                 {% for cert in fips_certs %}
                                     <li>
-                                        <a href="{{ url_for("fips.entry", hashid=cert["_id"]) }}">{{ cert["web_data"]["module_name"]|default("", true) }}</a>
+                                        <a href="{{ url_for("fips.entry", hashid=cert["_id"]) }}">{{ cert|fips_name|default("", true) }}</a>
                                     </li>
                                 {% endfor %}
                             </ul>
@@ -164,45 +166,55 @@
 
         {% if not cc_certs and not fips_certs %}
             <div class="row p-3">
-                <div class="col-10 mx-auto p-3 py-md-5">
+                <div class="col-12 col-sm-10 mx-auto p-3 py-md-5">
                     <h2>Looking for more?</h2>
                     <p class="lead">Explore the landscape of Common Criteria and FIPS 140 certificates.</p>
                     <div class="row g-4 row-cols-1 row-cols-lg-4">
                         <div class="col">
                             <div class="card h-100">
-                                <div class="card-body">
+                                <div class="card-body d-flex flex-column justify-content-between">
                                     <h4 class="card-title">Common Criteria</h4>
-                                    <p class="card-text">Want to explore Common Criteria certificates?</p>
-                                    <a href="{{ url_for("cc.index") }}" class="btn btn-primary">Go</a>
+                                    <p class="card-text flex-grow-1">Want to explore Common Criteria certificates?</p>
+                                    <div>
+                                        <a href="{{ url_for("cc.index") }}" class="btn btn-primary">Go</a>
+                                    </div>
                                 </div>
                             </div>
                         </div>
                         <div class="col">
                             <div class="card h-100">
-                                <div class="card-body">
+                                <div class="card-body d-flex flex-column justify-content-between">
                                     <h4 class="card-title">Protection Profiles</h4>
-                                    <p class="card-text">Want to explore Protection Profiles of Common Criteria
+                                    <p class="card-text flex-grow-1">Want to explore Protection Profiles of Common
+                                        Criteria
                                         certificates?</p>
-                                    <a href="{{ url_for("pp.index") }}" class="btn btn-primary">Go</a>
+                                    <div>
+                                        <a href="{{ url_for("pp.index") }}" class="btn btn-primary">Go</a>
+                                    </div>
                                 </div>
                             </div>
                         </div>
                         <div class="col">
                             <div class="card h-100">
-                                <div class="card-body">
+                                <div class="card-body d-flex flex-column justify-content-between">
                                     <h4 class="card-title">FIPS 140</h4>
-                                    <p class="card-text">Want to explore FIPS 140-2 and 140-3 certificates?</p>
-                                    <a href="{{ url_for("fips.index") }}" class="btn btn-primary">Go</a>
+                                    <p class="card-text flex-grow-1">Want to explore FIPS 140-2 and 140-3
+                                        certificates?</p>
+                                    <div>
+                                        <a href="{{ url_for("fips.index") }}" class="btn btn-primary">Go</a>
+                                    </div>
                                 </div>
                             </div>
                         </div>
                         <div class="col">
                             <div class="card h-100">
-                                <div class="card-body">
+                                <div class="card-body d-flex flex-column justify-content-between">
                                     <h4 class="card-title">Vulnerabilities</h4>
-                                    <p class="card-text">Want to explore how vulnerabilities affect certified
-                                        products?</p>
-                                    <a href="{{ url_for("vuln.index") }}" class="btn btn-primary">Go</a>
+                                    <p class="card-text flex-grow-1">Want to explore how vulnerabilities affect
+                                        certified products?</p>
+                                    <div>
+                                        <a href="{{ url_for("vuln.index") }}" class="btn btn-primary">Go</a>
+                                    </div>
                                 </div>
                             </div>
                         </div>

@@ -1,10 +1,14 @@
-{% extends "base.html.jinja2" %}
+{% extends "common/base.html.jinja2" %}
 {% set crumbs = True %}
 {% set search = True %}
 {% from "fips/utils.html.jinja2" import render_pagination, render_plot %}
+{% block metadata %}
+    {{ super() }}
+    <meta name="robots" content="noindex"/>
+{% endblock %}
 {% block content %}
     <main>
-        <div class="col-10 mx-auto p-3 py-md-5">
+        <div class="col-12 col-sm-10 mx-auto p-3 py-md-5">
             <div class="alert alert-warning d-sm-none" role="alert">
                 <i class="fas fa-exclamation-triangle"></i> This page was not yet optimized for use on mobile devices.
             </div>
@@ -20,16 +24,15 @@
                             <button id="search-btn" class="btn btn-primary"><i class="fas fa-search"></i>
                                 Search
                             </button>
-                            <button id="network-btn" class="btn btn-warning"
-                                    title="Experimental feature: Display the references network of the resulting certificates."
-                                    data-bs-toggle="tooltip"><i
-                                    class="fas fa-flask fa-fw fa-spin"></i> Display network
+                            <button id="network-btn" class="btn btn-primary"
+                                    title="Display the references network of the resulting certificates."
+                                    data-bs-toggle="tooltip">Display network
                             </button>
                             <button id="extended-btn" class="btn btn-outline-primary" type="button"
                                     data-bs-toggle="collapse"
                                     data-bs-target="#extended"
                                     aria-controls="extended"
-                                    aria-expanded="false"><i
+                                    aria-expanded="{% if advanced %}true{% else %}false{% endif %}"><i
                                     class="fas fa-sliders"></i> Advanced options
                             </button>
                         </div>
@@ -39,7 +42,7 @@
                                target="_blank" rel="noopener">MongoDB $text search</a>, use quotes to specify a phrase
                             and a hyphen-minus prefix to negate a match.</small>
                     </div>
-                    <div id="extended" class="collapse mt-3">
+                    <div id="extended" class="collapse {% if advanced %}show{% endif %} mt-3">
                         <div id="categories" class="mb-3">
                             <h4>Categories
                                 <button id="cat-select-all" class="btn btn-outline-primary">Select all</button>

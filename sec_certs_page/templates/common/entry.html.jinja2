@@ -1,9 +1,11 @@
 {% macro render_local_file(hashid, link_content, link, local_files, document, primary_style, secondary_style) %}
     <div class="btn-group">
-        <a class="btn {{ primary_style }}" role="button" href="{{ link }}"
-           data-bs-toggle="tooltip" data-bs-placement="bottom"
-           title="{{ link.split("/")[-1] if "/" in link else link }}" target="_blank"
-           rel="noopener">{{ link_content|safe }}</a>
+        {% if link %}
+            <a class="btn {{ primary_style }}" role="button" href="{{ link }}"
+               data-bs-toggle="tooltip" data-bs-placement="bottom"
+               title="{{ link.split("/")[-1] if "/" in link else link }}" target="_blank"
+               rel="noopener">{{ link_content|safe }}</a>
+        {% endif %}
         {% for format in ("pdf", "txt") %}
             {% if local_files.get((document, format)) %}
                 <a class="btn {{ secondary_style }}" role="button"
@@ -15,16 +17,20 @@
     </div>
 {% endmacro %}
 
-{% macro render_local_files(hashid, local_files, cert_link, report_link, target_link, primary_style="btn-outline-primary", secondary_style="btn-outline-secondary") %}
-    {% if cert_link %}
-        {{ render_local_file(hashid, '<i class="fas fa-file-contract"></i> Certificate', cert_link, local_files, "cert", primary_style, secondary_style) }}
-    {% endif %}
-    {% if report_link %}
-        {{ render_local_file(hashid, '<i class="fas fa-file-contract"></i> Certification report', report_link, local_files, "report", primary_style, secondary_style) }}
-    {% endif %}
-    {% if target_link %}
-        {{ render_local_file(hashid, '<i class="fas fa-file-alt"></i> Security target', target_link, local_files, "target", primary_style, secondary_style) }}
-    {% endif %}
+{% macro render_local_cert(hashid, local_files, cert_link, primary_style="btn-outline-primary", secondary_style="btn-outline-secondary") %}
+    {{ render_local_file(hashid, '<i class="fas fa-file-contract"></i> Certificate', cert_link, local_files, "cert", primary_style, secondary_style) }}
+{% endmacro %}
+
+{% macro render_local_report(hashid, local_files, report_link, primary_style="btn-outline-primary", secondary_style="btn-outline-secondary") %}
+    {{ render_local_file(hashid, '<i class="fas fa-file-contract"></i> Certification report', report_link, local_files, "report", primary_style, secondary_style) }}
+{% endmacro %}
+
+{% macro render_local_target(hashid, local_files, target_link, primary_style="btn-outline-primary", secondary_style="btn-outline-secondary") %}
+    {{ render_local_file(hashid, '<i class="fas fa-file-alt"></i> Security target', target_link, local_files, "target", primary_style, secondary_style) }}
+{% endmacro %}
+
+{% macro render_local_profile(hashid, local_files, profile_link, primary_style="btn-outline-primary", secondary_style="btn-outline-secondary") %}
+    {{ render_local_file(hashid, '<i class="fas fa-file-alt"></i> Protection profile', profile_link, local_files, "profile", primary_style, secondary_style) }}
 {% endmacro %}
 
 {% macro opt_line(name, key, obj, title) %}
@@ -83,53 +89,69 @@
 {% endmacro %}
 
 {% macro render_cves(cves) %}
-    <table class="table table-striped my-2">
-        <colgroup>
-            <col style="width:15%">
-            <col style="width:10%">
-            <col style="width:20%">
-            <col style="width:10%">
-            <col style="width:10%">
-            <col style="width:10%">
-            <col style="width:15%">
-        </colgroup>
-        <thead class="table-light">
-        <tr>
-            <th scope="col" colspan="1" rowspan="2">ID</th>
-            <th scope="col" colspan="1" rowspan="2">Links</th>
-            <th scope="col" colspan="1" rowspan="2">Severity</th>
-            <th scope="col" colspan="3">CVSS Score</th>
-            <th scope="col" colspan="1" rowspan="2">Published on</th>
-        </tr>
-        <tr>
-            <th scope="col" style="border-bottom-color: #dfe0e1">Base</th>
-            <th scope="col" style="border-bottom-color: #dfe0e1">Exploitability</th>
-            <th scope="col" style="border-bottom-color: #dfe0e1">Impact</th>
-        </tr>
-        </thead>
-        <tbody>
-        {% set years = namespace(cve=None, current=None) %}
-        {% for cve in cves %}
-            {% set years.current = cve["cve_id"].split("-")[1] %}
-            <tr {% if years.current != years.cve and years.cve %}
-                style="border-top: 2px solid var(--bs-dark)"{% endif %}>
-                <td><a href="{{ url_for("vuln.cve", cve_id=cve["cve_id"]) }}">{{ cve["cve_id"] }}</a></td>
-                <td>
-                    {{ render_cve_links(cve) }}
-                </td>
-                <td>
-                    {{ render_cve_impact(cve) }}
-                </td>
-                <td>{{ cve["impact"]["base_score"] }}</td>
-                <td>{{ cve["impact"]["explotability_score"] }}</td>
-                <td>{{ cve["impact"]["impact_score"] }}</td>
-                <td>{{ cve["published_date"]|fromisoformat()|strftime("%d.%m.%Y %H:%M") }}</td>
-
+    <div class="my-2">
+        <table class="table table-striped">
+            <colgroup>
+                <col style="width:15%">
+                <col style="width:10%">
+                <col style="width:20%">
+                <col style="width:10%">
+                <col style="width:10%">
+                <col style="width:10%">
+                <col style="width:15%">
+            </colgroup>
+            <thead>
+            <tr>
+                <th scope="col" colspan="1" rowspan="2">ID</th>
+                <th scope="col" colspan="1" rowspan="2">Links</th>
+                <th scope="col" colspan="1" rowspan="2">Severity</th>
+                <th scope="col" colspan="3">CVSS Score</th>
+                <th scope="col" colspan="1" rowspan="2">Published on</th>
             </tr>
-            {% set years.cve = years.current %}
-        {% endfor %}
-        </tbody>
-    </table>
+            <tr>
+                <th scope="col">Base</th>
+                <th scope="col">Exploitability</th>
+                <th scope="col">Impact</th>
+            </tr>
+            </thead>
+            <tbody>
+            {% set years = namespace(cve=None, current=None) %}
+            {% for cve in cves %}
+                {% set years.current = cve["cve_id"].split("-")[1] %}
+                <tr {% if years.current != years.cve and years.cve %}
+                    style="border-top: 2px solid var(--bs-dark)"{% endif %}
+                        {% if cves|length > 5 and loop.index0 >= 5 %}
+                    class="collapse cve-collapse" {% endif %}>
+                    <td><a href="{{ url_for("vuln.cve", cve_id=cve["cve_id"]) }}">{{ cve["cve_id"] }}</a></td>
+                    <td>
+                        {{ render_cve_links(cve) }}
+                    </td>
+                    <td>
+                        {{ render_cve_impact(cve) }}
+                    </td>
+                    <td>{{ cve["impact"]["base_score"] }}</td>
+                    <td>{{ cve["impact"]["explotability_score"] }}</td>
+                    <td>{{ cve["impact"]["impact_score"] }}</td>
+                    <td>{{ cve["published_date"]|fromisoformat()|strftime("%d.%m.%Y %H:%M") }}</td>
+
+                </tr>
+                {% set years.cve = years.current %}
+            {% endfor %}
+            </tbody>
+        </table>
+        {% if cves|length > 5 %}
+            <div id="cve-toggle" class="d-flex justify-content-center">
+                <div class="d-inline-flex flex-column">
+                    <span class="text-muted">Showing 5 out of {{ cves|length }}.</span>
+                    <button class="btn btn-outline-primary" type="button" data-bs-toggle="collapse"
+                            data-bs-target=".cve-collapse" aria-expanded="false"
+                            aria-controls=".cve-collapse"
+                            onclick="$('#cve-toggle').toggleClass('d-flex').hide()">Show all
+                    </button>
+                </div>
+            </div>
+        {% endif %}
+    </div>
 {%- endmacro %}
 
 {% macro render_references(network, hashid, type, status_func=None) %}
@@ -211,7 +233,7 @@
 
             <div id="{{ doc_prefix }}-{{ card_id }}-card" class="collapse"
                  aria-labelledby="{{ doc_prefix }}-{{ card_id }}-head">
-                <div class="card-body text-dark">
+                <div class="card-body">
                     {% for heading, keyword in keyword_sources.items() %}
                         {% if keyword not in hidden and keyword_scan[keyword] %}
                             <div data-cs-name="{{ doc_prefix }} - {{ card_name }} - {{ heading }}">

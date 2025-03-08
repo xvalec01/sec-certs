@@ -1,16 +1,12 @@
-{% extends "base.html.jinja2" %}
+{% extends "common/base.html.jinja2" %}
 {% set crumbs = True %}
 {% set search = False %}
 {% block title %}
     <title>Common Criteria reference network | sec-certs.org</title>
 {% endblock %}
-{% block head %}
-    {{ super() }}
-    <script type="text/javascript" src="{{ url_for("static", filename="network.js") }}"></script>
-{% endblock %}
 {% block content %}
     <main>
-        <div class="col-10 mx-auto p-3 py-md-5">
+        <div class="col-12 col-sm-10 mx-auto p-3 py-md-5">
             <h1 class="mb-4">Common Criteria</h1>
             <div class="alert alert-warning d-sm-none" role="alert">
                 <i class="fas fa-exclamation-triangle"></i> This page was not yet optimized for use on mobile devices.
@@ -33,9 +29,8 @@
                                     all
                                     certificates transitively referencing or being referenced by the search result
                                     certificates.</p>
-                                <a href="{{ url_for(".search") }}?{{ query|safe }}" class="btn btn-warning"
-                                   title="Experimental feature" data-bs-toggle="tooltip"><i
-                                        class="fas fa-flask fa-fw fa-spin"></i> Go back to search</a>
+                                <a href="{{ url_for(".search") }}?{{ query|safe }}" class="btn btn-primary">Go back to
+                                    search</a>
                             {% elif request.args.get("search") == "fulltext" %}
                                 <p>The certificates shown are part of the results of a search query and their (weak)
                                     reference
@@ -43,18 +38,16 @@
                                     all
                                     certificates transitively referencing or being referenced by the search result
                                     certificates.</p>
-                                <a href="{{ url_for(".fulltext_search") }}?{{ query|safe }}" class="btn btn-warning"
-                                   title="Experimental feature" data-bs-toggle="tooltip"><i
-                                        class="fas fa-flask fa-fw fa-spin"></i> Go back to search</a>
+                                <a href="{{ url_for(".fulltext_search") }}?{{ query|safe }}" class="btn btn-primary">Go
+                                    back to search</a>
                             {% elif request.args.get("search") == "cve" and request.args.get("cve") %}
                                 <p>The certificates highlighted are affected by <b>{{ request.args["cve"] }}</b>.
                                     The graph shows them and their (weak) reference
                                     graph components. This means that also all
                                     certificates transitively referencing or being referenced by the affected
                                     certificates.</p>
-                                <a href="{{ url_for("vuln.cve", cve_id=request.args["cve"]) }}" class="btn btn-warning"
-                                   title="Experimental feature" data-bs-toggle="tooltip"><i
-                                        class="fas fa-flask fa-fw fa-spin"></i> Go back to CVE</a>
+                                <a href="{{ url_for("vuln.cve", cve_id=request.args["cve"]) }}" class="btn btn-primary">
+                                    Go back to CVE</a>
                             {% endif %}
                             <a href="{{ url_for(".network") }}" class="btn btn-secondary"> Clear</a>
                         </div>
@@ -66,7 +59,9 @@
         <div class="border">
             <div id="network"></div>
         </div>
-        <script>
+        <script type="module">
+            import {createNetwork} from "/static/network.js";
+
             let network = createNetwork('network',
                 '{{ url_for(".network_graph")}}{% if query %}?{{ query|safe }}{% endif %}',
                 '{{ url_for(".categories") }}',

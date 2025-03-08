@@ -69,7 +69,7 @@
 {%- endmacro %}
 
 {% macro render_pagination(pagination, certs, search=False) %}
-    <div id="pagination">
+    <div id="pagination" class="table-responsive">
         {% if search %}
             <span style="text-align: center">{{ pagination.info }}</span>
         {% endif %}
@@ -113,7 +113,7 @@
                     <td>{{ render_status(status) }}</td>
                     <td>{{ level }}</td>
                     <td>{{ vendor }}</td>
-                    <td>{% for entry in cert_dates %}{{ entry["date"]|strftime("%d.%m.%Y") }}<br/>{% endfor %}</td>
+                    <td>{%if cert_dates %}{% for entry in cert_dates %}{{ entry["date"]|strftime("%d.%m.%Y") }}<br/>{% endfor %}{% endif %}</td>
                     <td>{% if sunset_date %}{{ sunset_date|strftime("%d.%m.%Y") }}{% endif %}</td>
                 </tr>
             {% endfor %}

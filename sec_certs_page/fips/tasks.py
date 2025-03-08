@@ -1,10 +1,15 @@
+import os
+import subprocess
 from datetime import timedelta
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 import dramatiq
 import sentry_sdk
+from dramatiq import pipeline
 from dramatiq.logging import get_logger
 from flask import current_app
+from sec_certs.dataset.auxiliary_dataset_handling import FIPSAlgorithmDatasetHandler
 from sec_certs.dataset.fips import FIPSDataset
 from sec_certs.sample.fips_iut import IUTSnapshot
 from sec_certs.sample.fips_mip import MIPSnapshot
@@ -90,6 +95,7 @@ class FIPSIndexer(Indexer, FIPSMixin):  # pragma: no cover
             "name": cert["web_data"]["module_name"],
             "document_type": document,
             "cert_schema": self.cert_schema,
+            "cert_id": str(cert["cert_id"]),
             "category": category_id,
             "status": cert["web_data"]["status"],
             "content": content,
@@ -102,15 +108,69 @@ def reindex_collection(to_reindex):  # pragma: no cover
     indexer.reindex(to_reindex)
 
 
+@actor("fips_reindex_all", "fips_reindex_all", "updates", timedelta(hours=1))
+def reindex_all():  # pragma: no cover
+    ids = list(map(lambda doc: doc["_id"], mongo.db.fips.find({}, {"_id": 1})))
+    to_reindex = [(dgst, doc) for dgst in ids for doc in ("report", "target", "cert")]
+    tasks = []
+    for i in range(0, len(to_reindex), 1000):
+        j = i + 1000
+        tasks.append(reindex_collection.message_with_options(args=(to_reindex[i:j],), pipe_ignore=True))
+    pipeline(tasks).run()
+
+
 class FIPSArchiver(Archiver, FIPSMixin):  # pragma: no cover
-    def archive_custom(self, paths, tmpdir):
-        pass
+    """
+    FIPS Dataset
+    ============
+
+    ├── auxiliary_datasets
+    │   ├── cpe_dataset.json
+    │   ├── cve_dataset.json
+    │   ├── cpe_match.json
+    │   └── algorithms.json
+    ├── certs
+    │   └── targets
+    │       ├── pdf
+    │       └── txt
+    └── dataset.json
+    """
+
+    def archive(self, ids, path, paths):
+        with TemporaryDirectory() as tmpdir:
+            logger.info(f"Archiving {path}")
+            tmpdir = Path(tmpdir)
+
+            auxdir = tmpdir / "auxiliary_datasets"
+            auxdir.mkdir()
+            os.symlink(paths["cve_path"], auxdir / "cve_dataset.json")
+            os.symlink(paths["cpe_path"], auxdir / "cpe_dataset.json")
+            os.symlink(paths["cpe_match_path"], auxdir / "cpe_match.json")
+            os.symlink(paths["output_path_algorithms"], auxdir / "algorithms.json")
+
+            os.symlink(paths["output_path"], tmpdir / "dataset.json")
+
+            certs = tmpdir / "certs"
+            certs.mkdir()
+            self.map_artifact_dir(ids, paths["target"], certs / "targets")
+
+            logger.info("Running tar...")
+            subprocess.run(["tar", "-hczvf", path, "."], cwd=tmpdir)
+            logger.info(f"Finished archiving {path}")
 
 
 @actor("fips_archive", "fips_archive", "updates", timedelta(hours=4))
-def archive(paths):  # pragma: no cover
+def archive(ids, paths):  # pragma: no cover
     archiver = FIPSArchiver()
-    archiver.archive(Path(current_app.instance_path) / current_app.config["DATASET_PATH_FIPS_ARCHIVE"], paths)
+    archiver.archive(ids, Path(current_app.instance_path) / current_app.config["DATASET_PATH_FIPS_ARCHIVE"], paths)
+
+
+@actor("fips_archive_all", "fips_archive_all", "updates", timedelta(hours=1))
+def archive_all():  # pragma: no cover
+    ids = list(map(lambda doc: doc["_id"], mongo.db.fips.find({}, {"_id": 1})))
+    updater = FIPSUpdater()
+    paths = updater.make_dataset_paths()
+    archive.send(ids, {name: str(path) for name, path in paths.items()})
 
 
 class FIPSUpdater(Updater, FIPSMixin):  # pragma: no cover
@@ -144,6 +204,7 @@ class FIPSUpdater(Updater, FIPSMixin):  # pragma: no cover
                     dset.analyze_certificates(update_json=False)
                 with sentry_sdk.start_span(op="fips.write_json", description="Write JSON"), suppress_child_spans():
                     dset.to_json(paths["output_path"])
+                    dset.aux_handlers[FIPSAlgorithmDatasetHandler].dset.to_json(paths["output_path_algorithms"])
 
             with sentry_sdk.start_span(op="fips.move", description="Move files"), suppress_child_spans():
                 for cert in dset:
@@ -167,8 +228,8 @@ class FIPSUpdater(Updater, FIPSMixin):  # pragma: no cover
     def reindex(self, to_reindex):
         reindex_collection.send(list(to_reindex))
 
-    def archive(self, paths):
-        archive.send(paths)
+    def archive(self, ids, paths):
+        archive.send(ids, paths)
 
 
 @actor("fips_update", "fips_update", "updates", timedelta(hours=16))
