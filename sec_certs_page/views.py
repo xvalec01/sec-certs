@@ -37,9 +37,17 @@ def about():
     return render_template("about.html.jinja2")
 
 
+@app.route("/changelog/")
+@register_breadcrumb(app, ".changelog", "Changelog")
+def changelog():
+    return render_template("changelog.html.jinja2")
+
+
 @app.route("/robots.txt")
 def robots():
-    content = f"Sitemap: {url_for('flask_sitemap.sitemap', _external=True)}"
+    content = f"""
+Sitemap: {url_for('flask_sitemap.sitemap', _external=True)}
+"""
     resp = make_response(content, 200)
     resp.mimetype = "text/plain"
     return resp
@@ -48,12 +56,13 @@ def robots():
 @app.errorhandler(HTTPException)
 def error(e):
     return (
-        render_template("error.html.jinja2", code=e.code, name=e.name, description=e.description),
+        render_template("common/error.html.jinja2", code=e.code, name=e.name, description=e.description),
         e.code,
     )
 
 
 @sitemap.register_generator
 def sitemap_urls():
-    yield "index", {}
-    yield "about", {}
+    yield "index", {}, None, None, 1.0
+    yield "about", {}, None, None, 0.9
+    yield "changelog", {}, None, None, 0.8

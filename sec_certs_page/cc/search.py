@@ -1,8 +1,10 @@
 from datetime import datetime
-from typing import List, Mapping, Sequence, Tuple
+from typing import List, Mapping, Optional, Tuple, Union
 
 import pymongo
 import sentry_sdk
+from pymongo.cursor import Cursor
+from werkzeug.datastructures import MultiDict
 
 from .. import mongo
 from ..cc import cc_categories
@@ -18,13 +20,26 @@ class CCBasicSearch(BasicSearch):
     collection = mongo.db.cc
 
     @classmethod
-    def select_certs(cls, q, cat, categories, status, sort, **kwargs) -> Tuple[Sequence[Mapping], int, List[datetime]]:
+    def parse_args(cls, args: Union[dict, MultiDict]) -> dict[str, Optional[Union[int, str]]]:
+        res = super().parse_args(args)
+        scheme = args.get("scheme", "any")
+        res["scheme"] = scheme
+        if scheme != "any":
+            res["advanced"] = True
+        return res
+
+    @classmethod
+    def select_certs(
+        cls, q, cat, categories, status, sort, **kwargs
+    ) -> Tuple[Cursor[Mapping], int, List[Optional[datetime]]]:
         """Take parsed args and get the certs as: cursor and count."""
         query = {}
         projection = {
             "_id": 1,
             "name": 1,
             "status": 1,
+            "scheme": 1,
+            "security_level._value": 1,
             "not_valid_before": 1,
             "not_valid_after": 1,
             "category": 1,
@@ -45,11 +60,19 @@ class CCBasicSearch(BasicSearch):
         if status is not None and status != "any":
             query["status"] = status
 
-        with sentry_sdk.start_span(op="mongo", description="Find certs."):
-            cursor = mongo.db.cc.find(query, projection)
-            count = mongo.db.cc.count_documents(query)
+        if "scheme" in kwargs and kwargs["scheme"] != "any":
+            query["scheme"] = kwargs["scheme"]
 
-        timeline = [datetime.strptime(cert["not_valid_before"]["_value"], "%Y-%m-%d") for cert in cursor.clone()]
+        if "eal" in kwargs and kwargs["eal"] != "any":
+            query["security_level._value"] = kwargs["eal"]
+
+        with sentry_sdk.start_span(op="mongo", description="Find certs."):
+            cursor: Cursor[Mapping] = cls.collection.find(query, projection)
+            count: int = cls.collection.count_documents(query)
+
+        timeline: List[Optional[datetime]] = [
+            datetime.strptime(cert["not_valid_before"]["_value"], "%Y-%m-%d") for cert in cursor.clone()
+        ]
 
         if sort == "match" and q is not None and q != "":
             cursor.sort([("score", {"$meta": "textScore"}), ("name", pymongo.ASCENDING)])
@@ -72,3 +95,12 @@ class CCFulltextSearch(FulltextSearch):
     categories = cc_categories  # type: ignore
     collection = mongo.db.cc
     doc_dir = "DATASET_PATH_CC_DIR"
+
+    @classmethod
+    def parse_args(cls, args: Union[dict, MultiDict]) -> dict[str, Optional[Union[int, str]]]:
+        res = super().parse_args(args)
+        scheme = args.get("scheme", "any")
+        res["scheme"] = scheme
+        if scheme != "any":
+            res["advanced"] = True
+        return res

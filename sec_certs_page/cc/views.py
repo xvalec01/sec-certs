@@ -1,27 +1,24 @@
 """Common Criteria views."""
 
 import random
-import re
 from functools import wraps
 from operator import itemgetter
-from pathlib import Path
 from urllib.parse import urlencode
 
 import pymongo
 import sentry_sdk
-from feedgen.feed import FeedGenerator
-from flask import Response, abort, current_app, redirect, render_template, request, send_file, url_for
+from flask import abort, current_app, redirect, render_template, request, url_for
 from flask_breadcrumbs import register_breadcrumb
 from flask_cachecontrol import cache_for
 from markupsafe import Markup
 from networkx import node_link_data
 from periodiq import cron
-from pytz import timezone
 from werkzeug.exceptions import BadRequest
 from werkzeug.utils import safe_join
 
 from .. import cache, mongo, sitemap
-from ..common.diffs import render_compare
+from ..common.diffs import cc_diff_method, render_compare
+from ..common.feed import Feed
 from ..common.objformats import StorageFormat, load
 from ..common.views import (
     entry_download_certificate_pdf,
@@ -33,7 +30,9 @@ from ..common.views import (
     entry_download_target_txt,
     expires_at,
     network_graph_func,
+    send_cacheable_instance_file,
     send_json_attachment,
+    sitemap_cert_pipeline,
 )
 from . import (
     cc,
@@ -41,6 +40,7 @@ from . import (
     cc_eals,
     cc_reference_types,
     cc_sars,
+    cc_schemes,
     cc_sfrs,
     cc_status,
     get_cc_analysis,
@@ -134,56 +134,28 @@ def index():
 @cc.route("/dataset.json")
 def dataset():
     """Common criteria dataset API endpoint."""
-    dset_path = Path(current_app.instance_path) / current_app.config["DATASET_PATH_CC_OUT"]
-    if not dset_path.is_file():
-        return abort(404)
-    return send_file(
-        dset_path,
-        as_attachment=True,
-        mimetype="application/json",
-        download_name="dataset.json",
-    )
+    return send_cacheable_instance_file(current_app.config["DATASET_PATH_CC_OUT"], "application/json", "dataset.json")
 
 
 @cc.route("/cc.tar.gz")
 def dataset_archive():
     """Common criteria dataset archive API endpoint."""
-    archive_path = Path(current_app.instance_path) / current_app.config["DATASET_PATH_CC_ARCHIVE"]
-    if not archive_path.is_file():
-        return abort(404)
-    return send_file(
-        archive_path,
-        as_attachment=True,
-        mimetype="application/gzip",
-        download_name="cc.tar.gz",
-    )
+    return send_cacheable_instance_file(current_app.config["DATASET_PATH_CC_ARCHIVE"], "application/gzip", "cc.tar.gz")
 
 
 @cc.route("/maintenance_updates.json")
 def maintenance_updates():
     """Common criteria maintenance updates dataset API endpoint."""
-    dset_path = Path(current_app.instance_path) / current_app.config["DATASET_PATH_CC_OUT_MU"]
-    if not dset_path.is_file():
-        return abort(404)
-    return send_file(
-        dset_path,
-        as_attachment=True,
-        mimetype="application/json",
-        download_name="maintenance_updates.json",
+    return send_cacheable_instance_file(
+        current_app.config["DATASET_PATH_CC_OUT_MU"], "application/json", "maintenance_updates.json"
     )
 
 
 @cc.route("/schemes.json")
 def schemes():
     """Common criteria scheme dataset API endpoint."""
-    dset_path = Path(current_app.instance_path) / current_app.config["DATASET_PATH_CC_OUT_SCHEME"]
-    if not dset_path.is_file():
-        return abort(404)
-    return send_file(
-        dset_path,
-        as_attachment=True,
-        mimetype="application/json",
-        download_name="schemes.json",
+    return send_cacheable_instance_file(
+        current_app.config["DATASET_PATH_CC_OUT_SCHEME"], "application/json", "schemes.json"
     )
 
 
@@ -237,6 +209,7 @@ def search():
     return render_template(
         "cc/search/index.html.jinja2",
         **res,
+        schemes=cc_schemes,
         title=f"Common Criteria [{res['q'] if res['q'] else ''}] ({res['page']}) | sec-certs.org",
     )
 
@@ -260,6 +233,7 @@ def fulltext_search():
     return render_template(
         "cc/search/fulltext.html.jinja2",
         **res,
+        schemes=cc_schemes,
         title=f"Common Criteria [{res['q'] if res['q'] else ''}] ({res['page']}) | sec-certs.org",
     )
 
@@ -273,30 +247,9 @@ def compare(one_hashid: str, other_hashid: str):
         return abort(404)
     doc_one = load(raw_one)
     doc_other = load(raw_other)
-    k1_order = [
-        "name",
-        "category",
-        "not_valid_before",
-        "not_valid_after",
-        "scheme",
-        "st_link",
-        "status",
-        "manufacturer",
-        "manufacturer_web",
-        "security_level",
-        "report_link",
-        "cert_link",
-        "protection_profiles",
-        "maintenance_updates",
-        "state",
-        "heuristics",
-        "pdf_data",
-        "_type",
-        "dgst",
-    ]
     return render_template(
         "common/compare.html.jinja2",
-        changes=render_compare(doc_one, doc_other, k1_order),
+        changes=render_compare(doc_one, doc_other, cc_diff_method),
         cert_one=doc_one,
         cert_other=doc_other,
         name_one=doc_one["name"],
@@ -361,12 +314,9 @@ def entry(hashid):
         doc = load(raw_doc)
         with sentry_sdk.start_span(op="mongo", description="Find profiles"):
             profiles = {}
-            for profile in doc["protection_profiles"]:
-                if not profile["pp_ids"]:
-                    continue
-                found = mongo.db.pp.find_one({"processed.cc_pp_csvid": {"$in": list(profile["pp_ids"])}})
-                if found:
-                    profiles[profile["pp_ids"]] = load(found)
+            if "protection_profiles" in doc["heuristics"] and doc["heuristics"]["protection_profiles"]:
+                res = mongo.db.pp.find({"_id": {"$in": list(doc["heuristics"]["protection_profiles"])}})
+                profiles = {p["_id"]: load(p) for p in res}
         renderer = CCRenderer()
         with sentry_sdk.start_span(op="mongo", description="Find and render diffs"):
             diffs = list(mongo.db.cc_diff.find({"dgst": hashid}, sort=[("timestamp", pymongo.DESCENDING)]))
@@ -388,7 +338,28 @@ def entry(hashid):
         with sentry_sdk.start_span(op="network", description="Find network"):
             cc_map = get_cc_map()
             cert_network = cc_map.get(hashid, {})
+        with sentry_sdk.start_span(op="mongo", description="Find prev/next certificates"):
+            # No need to "load()" the certs as they have no non-trivial types.
+            if "prev_certificates" in doc["heuristics"] and doc["heuristics"]["prev_certificates"]:
+                previous = list(
+                    mongo.db.cc.find(
+                        {"heuristics.cert_id": {"$in": list(doc["heuristics"]["prev_certificates"])}},
+                        {"_id": 1, "name": 1, "dgst": 1, "heuristics.cert_id": 1, "not_valid_before": 1},
+                    ).sort([("not_valid_before._value", pymongo.ASCENDING)])
+                )
+            else:
+                previous = []
+            if "next_certificates" in doc["heuristics"] and doc["heuristics"]["next_certificates"]:
+                next = list(
+                    mongo.db.cc.find(
+                        {"heuristics.cert_id": {"$in": list(doc["heuristics"]["next_certificates"])}},
+                        {"_id": 1, "name": 1, "dgst": 1, "heuristics.cert_id": 1, "not_valid_before": 1},
+                    ).sort([("not_valid_before._value", pymongo.ASCENDING)])
+                )
+            else:
+                next = []
         with sentry_sdk.start_span(op="mongo", description="Find related certificates"):
+            # No need to "load()" the certs as they have no non-trivial types.
             similar_projection = {
                 "_id": 1,
                 "name": 1,
@@ -460,6 +431,8 @@ def entry(hashid):
             network=cert_network,
             title=f"{name} | sec-certs.org",
             similar=similar,
+            previous=previous,
+            next=next,
             same=same,
             removed=diffs[0]["type"] == "remove",
         )
@@ -540,49 +513,12 @@ def entry_json(hashid):
 @cc.route("/<string(length=16):hashid>/feed.xml")
 @redir_new
 def entry_feed(hashid):
-    with sentry_sdk.start_span(op="mongo", description="Find cert"):
-        raw_doc = mongo.db.cc.find_one({"_id": hashid})
-    if raw_doc:
-        tz = timezone("Europe/Prague")
-        doc = load(raw_doc)
-        entry_url = url_for(".entry", hashid=hashid, _external=True)
-        renderer = CCRenderer()
-        with sentry_sdk.start_span(op="mongo", description="Find and render diffs"):
-            diffs = list(map(load, mongo.db.cc_diff.find({"dgst": hashid}, sort=[("timestamp", pymongo.ASCENDING)])))
-            diff_renders = list(map(lambda x: renderer.render_diff(hashid, doc, x, linkback=True), diffs))
-        fg = FeedGenerator()
-        fg.id(request.base_url)
-        fg.title(re.sub("[^\u0020-\uD7FF\u0009\u000A\u000D\uE000-\uFFFD\U00010000-\U0010FFFF]+", "", doc["name"]))
-        fg.author({"name": "sec-certs", "email": "webmaster@sec-certs.org"})
-        fg.link({"href": entry_url, "rel": "alternate"})
-        fg.link({"href": request.base_url, "rel": "self"})
-        fg.icon(url_for("static", filename="img/favicon.png", _external=True))
-        fg.logo(url_for("static", filename="img/cc_card.png", _external=True))
-        fg.language("en")
-        last_update = None
-        for diff, render in zip(diffs, diff_renders):
-            date = tz.localize(diff["timestamp"])
-            fe = fg.add_entry()
-            fe.author({"name": "sec-certs", "email": "webmaster@sec-certs.org"})
-            fe.title(
-                {
-                    "back": "Certificate reappeared",
-                    "change": "Certificate changed",
-                    "new": "New certificate",
-                    "remove": "Certificate removed",
-                }[diff["type"]]
-            )
-            fe.id(entry_url + str(diff["_id"]))
-            stripped = re.sub("[^\u0020-\uD7FF\u0009\u000A\u000D\uE000-\uFFFD\U00010000-\U0010FFFF]+", "", str(render))
-            fe.content(stripped, type="html")
-            fe.published(date)
-            fe.updated(date)
-            if last_update is None or date > last_update:
-                last_update = date
-
-        fg.lastBuildDate(last_update)
-        fg.updated(last_update)
-        return Response(fg.atom_str(pretty=True), mimetype="application/atom+xml")
+    feed = Feed(
+        CCRenderer(), "img/cc_card.png", mongo.db.cc, mongo.db.cc_diff, lambda doc: doc["name"] if doc["name"] else ""
+    )
+    response = feed.render(hashid)
+    if response:
+        return response
     else:
         return abort(404)
 
@@ -619,7 +555,7 @@ def entry_name(name):
 
 @sitemap.register_generator
 def sitemap_urls():
-    yield "cc.index", {}
+    yield "cc.index", {}, None, None, 0.9
     yield "cc.dataset", {}
     yield "cc.maintenance_updates", {}
     yield "cc.network", {}
@@ -627,5 +563,5 @@ def sitemap_urls():
     yield "cc.search", {}
     yield "cc.fulltext_search", {}
     yield "cc.rand", {}
-    for doc in mongo.db.cc.find({}, {"_id": 1}):
-        yield "cc.entry", {"hashid": doc["_id"]}
+    for doc in mongo.db.cc.aggregate(sitemap_cert_pipeline("cc"), allowDiskUse=True):
+        yield "cc.entry", {"hashid": doc["_id"]}, doc["timestamp"].strftime("%Y-%m-%d"), "weekly", 0.8

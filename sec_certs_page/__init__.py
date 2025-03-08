@@ -1,4 +1,5 @@
 import os
+import sys
 from contextvars import ContextVar
 from pathlib import Path
 
@@ -15,7 +16,7 @@ from dramatiq.middleware import (
 )
 from dramatiq.results import Results
 from dramatiq.results.backends import RedisBackend, StubBackend
-from flask import Flask
+from flask import Flask, abort
 from flask_assets import Environment as Assets
 from flask_breadcrumbs import Breadcrumbs
 from flask_caching import Cache
@@ -42,6 +43,9 @@ from .common.config import RuntimeConfig
 from .common.dash.base import Dash
 from .common.search.index import create_index, get_index
 from .common.sentry import DramatiqIntegration
+
+# See https://github.com/crocs-muni/sec-certs/issues/470
+sys.setrecursionlimit(8000)
 
 instance_path = os.environ.get("INSTANCE_PATH", None)
 app: Flask = Flask(__name__, instance_path=instance_path, instance_relative_config=True)
@@ -143,12 +147,14 @@ csrf.exempt("dash.dash.dispatch")
 
 
 class Sitemap(FlaskSitemap):
-    @cache.cached(timeout=3600)
+    @cache.memoize(args_to_ignore=("self",), timeout=3600 * 24 * 7)
     def sitemap(self):
         return super().sitemap()
 
-    @cache.cached(timeout=3600)
+    @cache.memoize(args_to_ignore=("self",), timeout=3600 * 24 * 7)
     def page(self, page):
+        if page < 1:
+            return abort(404)
         return super().page(page)
 
 

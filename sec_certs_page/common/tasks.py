@@ -2,7 +2,6 @@ import json
 import logging
 import os
 import secrets
-import subprocess
 from abc import abstractmethod
 from collections import Counter
 from datetime import datetime, timedelta
@@ -10,7 +9,6 @@ from functools import wraps
 from operator import itemgetter
 from pathlib import Path
 from shutil import rmtree
-from tempfile import TemporaryDirectory
 from typing import List, Set, Tuple, Type
 
 import dramatiq
@@ -29,6 +27,12 @@ from pkg_resources import get_distribution
 from pymongo import DESCENDING, InsertOne, ReplaceOne
 from redis.exceptions import LockNotOwnedError
 from redis.lock import Lock
+from sec_certs.dataset.auxiliary_dataset_handling import (
+    CPEDatasetHandler,
+    CPEMatchDictHandler,
+    CVEDatasetHandler,
+    ProtectionProfileDatasetHandler,
+)
 from sec_certs.dataset.dataset import Dataset
 
 from .. import mail, mongo, redis, whoosh_index
@@ -50,16 +54,19 @@ class Indexer:  # pragma: no cover
     def reindex(self, to_reindex):
         logger.info(f"Reindexing {len(to_reindex)} {self.cert_schema} files.")
         updated = 0
-        with whoosh_index.writer() as writer:
-            for i, (dgst, document) in enumerate(to_reindex):
-                fpath = entry_file_path(dgst, self.dataset_path, document, "txt")
+        with whoosh_index.writer() as writer, writer.searcher() as searcher:
+            for i, (dgst, document_type) in enumerate(to_reindex):
+                fpath = entry_file_path(dgst, self.dataset_path, document_type, "txt")
                 try:
                     with fpath.open("r") as f:
                         content = f.read()
                 except FileNotFoundError:
                     continue
                 cert = mongo.db[self.cert_schema].find_one({"_id": dgst})
-                writer.update_document(**self.create_document(dgst, document, cert, content))
+                docid = searcher.document_number(dgst=dgst, document_type=document_type)
+                if docid is not None:
+                    writer.delete_document(docid)
+                writer.add_document(**self.create_document(dgst, document_type, cert, content))
                 updated += 1
                 if i % 100 == 0:
                     logger.info(f"{i}: updated {updated}.")
@@ -74,6 +81,7 @@ class Updater:  # pragma: no cover
     dset_class: Type[Dataset]
 
     def make_dataset_paths(self):
+        """Setup paths from the config for the particular updater (CC, FIPS, PP)."""
         instance_path = Path(current_app.instance_path)
         ns = current_app.config.get_namespace("DATASET_PATH_")
 
@@ -91,7 +99,7 @@ class Updater:  # pragma: no cover
                 suffix = key[len(out_prefix) :]
                 res[f"output_path{suffix}"] = instance_path / value
 
-        for document in ("report", "target", "cert"):
+        for document in ("report", "target", "cert", "profile"):
             doc_path = res["dir_path"] / document
             doc_path.mkdir(parents=True, exist_ok=True)
             res[document] = doc_path
@@ -220,7 +228,7 @@ class Updater:  # pragma: no cover
     def reindex(self, to_reindex): ...
 
     @abstractmethod
-    def archive(self, paths): ...
+    def archive(self, ids, paths): ...
 
     def update(self):
         try:
@@ -240,18 +248,38 @@ class Updater:  # pragma: no cover
 
         if not dset.auxiliary_datasets_dir.exists():
             dset.auxiliary_datasets_dir.mkdir(parents=True)
-        if paths["cve_path"].exists():
-            if dset.cve_dataset_path.exists():
-                dset.cve_dataset_path.unlink()
-            os.symlink(paths["cve_path"], dset.cve_dataset_path)
-        if paths["cpe_path"].exists():
-            if dset.cpe_dataset_path.exists():
-                dset.cpe_dataset_path.unlink()
-            os.symlink(paths["cpe_path"], dset.cpe_dataset_path)
-        if paths["cpe_match_path"].exists():
-            if dset.cpe_match_json_path.exists():
-                dset.cpe_match_json_path.unlink()
-            os.symlink(paths["cpe_match_path"], dset.cpe_match_json_path)
+        if paths["cve_path"].exists() and CVEDatasetHandler in dset.aux_handlers:
+            cve_dset_path = dset.aux_handlers[CVEDatasetHandler].dset_path
+            if cve_dset_path.exists():
+                cve_dset_path.unlink()
+            cve_dset_parent = cve_dset_path.parent
+            cve_dset_parent.mkdir(parents=True, exist_ok=True)
+            os.symlink(paths["cve_path"], cve_dset_path)
+        if paths["cpe_path"].exists() and CPEDatasetHandler in dset.aux_handlers:
+            cpe_dset_path = dset.aux_handlers[CPEDatasetHandler].dset_path
+            if cpe_dset_path.exists():
+                cpe_dset_path.unlink()
+            cpe_dset_parent = cpe_dset_path.parent
+            cpe_dset_parent.mkdir(parents=True, exist_ok=True)
+            os.symlink(paths["cpe_path"], cpe_dset_path)
+        if paths["cpe_match_path"].exists() and CPEMatchDictHandler in dset.aux_handlers:
+            cpe_match_dset_path = dset.aux_handlers[CPEMatchDictHandler].dset_path
+            if cpe_match_dset_path.exists():
+                cpe_match_dset_path.unlink()
+            cpe_match_dset_parent = cpe_match_dset_path.parent
+            cpe_match_dset_parent.mkdir(parents=True, exist_ok=True)
+            os.symlink(paths["cpe_match_path"], cpe_match_dset_path)
+        if (
+            "output_path_pp" in paths
+            and paths["output_path_pp"].exists()
+            and ProtectionProfileDatasetHandler in dset.aux_handlers
+        ):
+            pp_dset_path = dset.aux_handlers[ProtectionProfileDatasetHandler].dset_path
+            if pp_dset_path.exists():
+                pp_dset_path.unlink()
+            pp_dset_parent = pp_dset_path.parent
+            pp_dset_parent.mkdir(parents=True, exist_ok=True)
+            os.symlink(paths["output_path_pp"], pp_dset_path)
 
         update_result = None
         run_doc = None
@@ -318,10 +346,11 @@ class Updater:  # pragma: no cover
             mongo.db[self.log_collection].update_one(
                 {"_id": update_result.inserted_id}, {"$set": {"stats.changed_ids": changed_ids}}
             )
+            all_ids = list(map(itemgetter("_id"), mongo.db[self.collection].find({}, {"_id": 1})))
 
             self.notify(update_result.inserted_id)
             self.reindex(to_reindex)
-            self.archive({name: str(path) for name, path in paths.items()})
+            self.archive(all_ids, {name: str(path) for name, path in paths.items()})
         except Exception as e:
             # Store the failure in the update log
             end = datetime.now()
@@ -357,18 +386,32 @@ class Notifier(DiffRenderer):
         change_certs = {
             obj["dgst"]: load(obj) for obj in mongo.db[self.collection].find({"_id": {"$in": change_dgsts}})
         }
+        new_diffs = {
+            obj["dgst"]: load(obj) for obj in mongo.db[self.diff_collection].find({"run_id": run_oid, "type": "new"})
+        }
+        new_dgsts = list(new_diffs.keys())
+        new_certs = {obj["dgst"]: load(obj) for obj in mongo.db[self.collection].find({"_id": {"$in": new_dgsts}})}
 
         # Render the individual diffs
         change_renders = {}
         for dgst in change_dgsts:
-            change_renders[dgst] = self.render_diff(dgst, change_certs[dgst], change_diffs[dgst], linkback=True)
+            change_renders[dgst] = self.render_diff(
+                dgst, change_certs[dgst], change_diffs[dgst], linkback=True, name=True
+            )
+        new_renders = {}
+        for dgst in new_dgsts:
+            new_renders[dgst] = self.render_diff(dgst, new_certs[dgst], new_diffs[dgst], linkback=True)
 
         # Group the subscriptions by email
         change_sub_emails = mongo.db.subs.find(
             {"certificate.hashid": {"$in": change_dgsts}, "confirmed": True, "certificate.type": self.collection},
             {"email": 1},
         )
-        emails = {sub["email"] for sub in change_sub_emails}
+        new_sub_emails = mongo.db.subs.find(
+            {"updates": "new", "confirmed": True},
+            {"email": 1},
+        )
+        emails = {sub["email"] for sub in change_sub_emails} | {sub["email"] for sub in new_sub_emails}
 
         # Load Bootstrap CSS
         with current_app.open_resource("static/lib/bootstrap.min.css", "r") as f:
@@ -381,6 +424,12 @@ class Notifier(DiffRenderer):
 
         # Go over the subscribed emails
         for email in emails:
+            cards = []
+            urls = []
+            email_token = None
+
+            # Go over the subscriptions for a given email and accumulate its rendered diffs
+            some_changes = False
             subscriptions = list(
                 mongo.db.subs.find(
                     {
@@ -391,34 +440,50 @@ class Notifier(DiffRenderer):
                     }
                 )
             )
-            email_token = subscriptions[0]["email_token"]
-            cards = []
-            urls = []
-            # Go over the subscriptions for a given email and accumulate its rendered diffs
-            for sub in subscriptions:
-                dgst = sub["certificate"]["hashid"]
-                diff = change_diffs[dgst]
-                render = change_renders[dgst]
-                if sub["updates"] == "vuln":
-                    # This is a vuln only subscription so figure out if the change is in a vuln.
-                    if h := diff["diff"][symbols.update].get("heuristics"):
-                        for action, val in h.items():
-                            if "related_cves" in val:
-                                break
+            if subscriptions:
+                email_token = subscriptions[0]["email_token"]
+                for sub in subscriptions:
+                    dgst = sub["certificate"]["hashid"]
+                    diff = change_diffs[dgst]
+                    render = change_renders[dgst]
+                    if sub["updates"] == "vuln":
+                        # This is a vuln only subscription so figure out if the change is in a vuln.
+                        if h := diff["diff"][symbols.update].get("heuristics"):
+                            for action, val in h.items():
+                                if "related_cves" in val:
+                                    break
+                            else:
+                                continue
                         else:
                             continue
-                    else:
-                        continue
-                cards.append(render)
-                urls.append(url_for(f"{self.collection}.entry", hashid=dgst, _external=True))
-            if not cards:
+                    cards.append(render)
+                    urls.append(url_for(f"{self.collection}.entry", hashid=dgst, _external=True))
+                    some_changes = True
+
+            # If the user is subscribed for new certs, add them.
+            some_new = False
+            new_subscription = next(
+                iter(mongo.db.subs.find({"confirmed": True, "email": email, "updates": "new"})), None
+            )
+            if new_subscription:
+                email_token = new_subscription["email_token"]
+                for dgst, render in new_renders.items():
+                    cards.append(render)
+                    urls.append(url_for(f"{self.collection}.entry", hashid=dgst, _external=True))
+                    some_new = True
+            if not some_changes and not some_new:
                 # Nothing to send, due to only "vuln" subscription and non-vuln diffs
+                continue
+            if email_token is None:
+                logger.error(f"Email token undefined for {email}.")
                 continue
             # Render diffs into body template
             email_core_html = render_template(
                 "notifications/email/notification_email.html.jinja2",
                 cards=cards,
                 email_token=email_token,
+                changes=some_changes,
+                new=some_new,
             )
             # Filter out unused CSS rules
             cleaned_css = filter_css(bootstrap_parsed, email_core_html)
@@ -433,6 +498,8 @@ class Notifier(DiffRenderer):
                 "notifications/email/notification_email.txt.jinja2",
                 email_token=email_token,
                 urls=urls,
+                changes=some_changes,
+                new=some_new,
             )
             # Send out the message
             msg = Message(
@@ -443,53 +510,69 @@ class Notifier(DiffRenderer):
 
 class Archiver:  # pragma: no cover
     """
-    ├── auxiliary_datasets
+    Dataset
+    =======
+
+    ├── auxiliary_datasets          (not PP)
     │   ├── cpe_dataset.json
-    │   └── cve_dataset.json
-    ├── cc_mu.json        (only CC)
-    ├── cc_scheme.json    (only CC)
+    │   ├── cve_dataset.json
+    │   ├── cpe_match.json
+    │   ├── algorithms.json         (only FIPS)
+    │   ├── cc_scheme.json          (only CC)
+    │   ├── protection_profiles     (only CC)
+    │   │   ├── reports
+    │   │   │   ├── pdf
+    │   │   │   └── txt
+    │   │   ├── pps
+    │   │   │   ├── pdf
+    │   │   │   └── txt
+    │   │   └── dataset.json
+    │   └── maintenances            (only CC)
+    │       ├── certs
+    │       │   ├── reports
+    │       │   │   ├── pdf
+    │       │   │   └── txt
+    │       │   └── targets
+    │       │       ├── pdf
+    │       │       └── txt
+    │       └── maintenance_updates.json
     ├── certs
-    │   ├── reports
+    │   ├── reports                 (not FIPS)
     │   │   ├── pdf
     │   │   └── txt
-    │   └── targets
+    │   ├── targets                 (only CC and FIPS)
     │   │   ├── pdf
     │   │   └── txt
-    │   └── certificates
+    │   ├── pps                     (only PP)
+    │   │   ├── pdf
+    │   │   └── txt
+    │   └── certificates            (only CC)
     │       ├── pdf
     │       └── txt
-    ├── cpe_match.json
-    ├── dataset.json
-    └── pp.json          (only CC)
+    ├── reports                     (only PP)
+    │   ├── pdf
+    │   └── txt
+    ├── pps                         (only PP)
+    │   ├── pdf
+    │   └── txt
+    ├── pp.json                     (only PP)
+    └── dataset.json
     """
 
-    def archive(self, path, paths):
-        with TemporaryDirectory() as tmpdir:
-            logger.info(f"Archiving {path}")
-            tmpdir = Path(tmpdir)
+    def map_artifact_dir(self, ids, fromdir, todir):
+        for format in ("pdf", "txt"):
+            src = Path(fromdir) / format
+            dst = Path(todir) / format
+            dst.mkdir(parents=True, exist_ok=True)
+            for id in ids:
+                name = f"{id}.{format}"
+                from_file = src / name
+                to_file = dst / name
+                if from_file.exists():
+                    os.symlink(from_file, to_file)
 
-            auxdir = tmpdir / "auxiliary_datasets"
-            auxdir.mkdir()
-            os.symlink(paths["cve_path"], auxdir / "cve_dataset.json")
-            os.symlink(paths["cpe_path"], auxdir / "cpe_dataset.json")
-
-            os.symlink(paths["cpe_match_path"], tmpdir / "cpe_match.json")
-            os.symlink(paths["output_path"], tmpdir / "dataset.json")
-
-            self.archive_custom(paths, tmpdir)
-
-            certs = tmpdir / "certs"
-            certs.mkdir()
-            os.symlink(paths["report"], certs / "reports")
-            os.symlink(paths["target"], certs / "targets")
-            os.symlink(paths["cert"], certs / "certificates")
-
-            logger.info("Running tar...")
-            subprocess.run(["tar", "-hczvf", path, "."], cwd=tmpdir)
-            logger.info(f"Finished archiving {path}")
-
-    @abstractmethod
-    def archive_custom(self, paths, tmpdir): ...
+    def archive(self, ids, path, paths):
+        pass
 
 
 def no_simultaneous_execution(lock_name: str, abort: bool = False, timeout: float = 60 * 10):  # pragma: no cover
@@ -526,14 +609,16 @@ def no_simultaneous_execution(lock_name: str, abort: bool = False, timeout: floa
 def single_queue(queue_name: str, timeout: float = 60 * 10):  # pragma: no cover
     """
     A decorator that prevents simultaneous execution of more than one actor in a queue.
-    It does so  by requeueing the actor.
-
+    It does so by requeueing the actor.
     """
 
     def deco(f):
         @wraps(f)
         def wrapper(*args, **kwargs):
             msg = CurrentMessage.get_current_message()
+            if msg is None:
+                # If we are testing and not in a worker, just execute
+                return f(*args, **kwargs)
             retries = msg.options.get("retries", 0)
             lock: Lock = redis.lock(queue_name, timeout=timeout)
             acq = lock.acquire(blocking=False)
@@ -557,18 +642,19 @@ def task(task_name):
     def deco(f):
         @wraps(f)
         def wrapper(*args, **kwargs):
-            tid = secrets.token_hex(16)
-            start = datetime.now()
-            data = {"name": task_name, "start_time": start.isoformat()}
-            logger.info(f'Starting task ({task_name}), tid="{tid}"')
-            redis.set(tid, json.dumps(data))
-            redis.sadd("tasks", tid)
-            try:
-                return f(*args, **kwargs)
-            finally:
-                logger.info(f'Ending task ({task_name}), tid="{tid}", took {datetime.now() - start}')
-                redis.srem("tasks", tid)
-                redis.delete(tid)
+            with sentry_sdk.start_transaction(op="dramatiq", name=task_name):
+                tid = secrets.token_hex(16)
+                start = datetime.now()
+                data = {"name": task_name, "start_time": start.isoformat()}
+                logger.info(f'Starting task ({task_name}), tid="{tid}"')
+                redis.set(tid, json.dumps(data))
+                redis.sadd("tasks", tid)
+                try:
+                    return f(*args, **kwargs)
+                finally:
+                    logger.info(f'Ending task ({task_name}), tid="{tid}", took {datetime.now() - start}')
+                    redis.srem("tasks", tid)
+                    redis.delete(tid)
 
         return wrapper
 

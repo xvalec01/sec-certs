@@ -8,7 +8,7 @@ from sec_certs_page import mongo
 
 @pytest.fixture()
 def certificate():
-    return mongo.db.cc.find_one({"_id": "54f754dc95137c47"})
+    return mongo.db.cc.find_one({"_id": "6ca52f5450bedb2f"})
 
 
 @pytest.fixture()
@@ -24,6 +24,16 @@ def sub_obj(certificate):
         ],
         "email": "example@example.com",
         "updates": "all",
+        "captcha": "...",
+    }
+
+
+@pytest.fixture()
+def sub_obj_new(certificate):
+    return {
+        "selected": None,
+        "email": "example@example.com",
+        "updates": "new",
         "captcha": "...",
     }
 
@@ -61,6 +71,22 @@ def test_subscribe(client: FlaskClient, mocker: MockerFixture, sub_obj):
     assert subscription["timestamp"]
     at.assert_called_once_with(subscription["token"])
     mongo.db.subs.delete_one({"email": sub_obj["email"]})
+
+
+def test_subscribe_new(client: FlaskClient, mocker: MockerFixture, sub_obj_new):
+    mocker.patch("sec_certs_page.common.views.validate_captcha")
+    mocker.patch("flask_wtf.csrf.validate_csrf")
+    at = mocker.patch("dramatiq.Actor.send")
+    resp = client.post("/notify/subscribe/", json=sub_obj_new)
+    assert resp.status_code == 200
+    assert resp.is_json
+    assert resp.json == {"status": "OK"}
+    subscription = mongo.db.subs.find_one({"email": sub_obj_new["email"]})
+    assert subscription
+    assert subscription["token"]
+    assert subscription["timestamp"]
+    at.assert_called_once_with(subscription["token"])
+    mongo.db.subs.delete_one({"email": sub_obj_new["email"]})
 
 
 def test_bad_subscribe(client: FlaskClient, mocker: MockerFixture):
@@ -109,6 +135,17 @@ def test_bad_subscribe(client: FlaskClient, mocker: MockerFixture):
     )
     assert resp.status_code == 400
     at.assert_not_called()
+    resp = client.post(
+        "/notify/subscribe/",
+        json={
+            "email": "example@example.com",
+            "selected": [{"hashid": "b906b2e8d7617202", "name": 5, "url": "...", "type": "cc"}],
+            "updates": "all",
+            "captcha": "...",
+        },
+    )
+    assert resp.status_code == 400
+    at.assert_not_called()
 
 
 def test_confirm(client: FlaskClient, unconfirmed_subscription):
@@ -126,9 +163,21 @@ def test_manage(client: FlaskClient, confirmed_subscription, mocker: MockerFixtu
         "certificates-0-certificate_hashid": confirmed_subscription["certificate"]["hashid"],
         "certificates-0-subscribe": "y",
         "certificates-0-updates": "vuln",
+        "new": "y",
     }
     resp = client.post(f"/notify/manage/{confirmed_subscription['email_token']}", data=data, follow_redirects=True)
     assert resp.status_code == 200
+    new_sub = mongo.db.subs.find_one({"email_token": confirmed_subscription["email_token"], "updates": "new"})
+    assert new_sub is not None
+    data = {
+        "certificates-0-certificate_hashid": confirmed_subscription["certificate"]["hashid"],
+        "certificates-0-subscribe": "y",
+        "certificates-0-updates": "vuln",
+    }
+    resp = client.post(f"/notify/manage/{confirmed_subscription['email_token']}", data=data, follow_redirects=True)
+    assert resp.status_code == 200
+    new_sub = mongo.db.subs.find_one({"email_token": confirmed_subscription["email_token"], "updates": "new"})
+    assert new_sub is None
     sub = mongo.db.subs.find_one({"_id": confirmed_subscription["_id"]})
     assert sub["updates"] == "vuln"
     del data["certificates-0-subscribe"]

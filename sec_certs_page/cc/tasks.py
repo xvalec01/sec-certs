@@ -1,10 +1,14 @@
 import logging
 import os
+import subprocess
 from datetime import timedelta
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 import sentry_sdk
+from dramatiq import pipeline
 from flask import current_app
+from sec_certs.dataset.auxiliary_dataset_handling import CCMaintenanceUpdateDatasetHandler, CCSchemeDatasetHandler
 from sec_certs.dataset.cc import CCDataset
 from sec_certs.utils.helpers import get_sha256_filepath
 
@@ -66,9 +70,11 @@ class CCIndexer(Indexer, CCMixin):  # pragma: no cover
             "dgst": dgst,
             "name": cert["name"],
             "document_type": document,
+            "cert_id": cert["heuristics"]["cert_id"],
             "cert_schema": self.cert_schema,
             "category": category_id,
             "status": cert["status"],
+            "scheme": cert["scheme"],
             "content": content,
         }
 
@@ -79,17 +85,100 @@ def reindex_collection(to_reindex):  # pragma: no cover
     indexer.reindex(to_reindex)
 
 
+@actor("cc_reindex_all", "cc_reindex_all", "updates", timedelta(hours=1))
+def reindex_all():  # pragma: no cover
+    ids = list(map(lambda doc: doc["_id"], mongo.db.cc.find({}, {"_id": 1})))
+    to_reindex = [(dgst, doc) for dgst in ids for doc in ("report", "target", "cert")]
+    tasks = []
+    for i in range(0, len(to_reindex), 1000):
+        j = i + 1000
+        tasks.append(reindex_collection.message_with_options(args=(to_reindex[i:j],), pipe_ignore=True))
+    pipeline(tasks).run()
+
+
 class CCArchiver(Archiver, CCMixin):  # pragma: no cover
-    def archive_custom(self, paths, tmpdir):
-        os.symlink(paths["output_path_mu"], tmpdir / "cc_mu.json")
-        os.symlink(paths["output_path_scheme"], tmpdir / "cc_scheme.json")
-        os.symlink(Path(current_app.instance_path) / "pp.json", tmpdir / "pp.json")
+    """
+    CC Dataset
+    ==========
+
+    ├── auxiliary_datasets
+    │   ├── cpe_dataset.json
+    │   ├── cve_dataset.json
+    │   ├── cpe_match.json
+    │   ├── cc_scheme.json
+    │   ├── protection_profiles
+    │   │   ├── reports             (not present)
+    │   │   │   ├── pdf
+    │   │   │   └── txt
+    │   │   ├── pps                 (not present)
+    │   │   │   ├── pdf
+    │   │   │   └── txt
+    │   │   └── dataset.json
+    │   └── maintenances
+    │       ├── certs               (not present)
+    │       │   ├── reports
+    │       │   │   ├── pdf
+    │       │   │   └── txt
+    │       │   └── targets
+    │       │       ├── pdf
+    │       │       └── txt
+    │       └── maintenance_updates.json
+    ├── certs
+    │   ├── reports
+    │   │   ├── pdf
+    │   │   └── txt
+    │   ├── targets
+    │   │   ├── pdf
+    │   │   └── txt
+    │   └── certificates
+    │       ├── pdf
+    │       └── txt
+    └── dataset.json
+    """
+
+    def archive(self, ids, path, paths):
+        with TemporaryDirectory() as tmpdir:
+            logger.info(f"Archiving {path}")
+            tmpdir = Path(tmpdir)
+
+            auxdir = tmpdir / "auxiliary_datasets"
+            auxdir.mkdir()
+            os.symlink(paths["cve_path"], auxdir / "cve_dataset.json")
+            os.symlink(paths["cpe_path"], auxdir / "cpe_dataset.json")
+            os.symlink(paths["cpe_match_path"], auxdir / "cpe_match.json")
+            os.symlink(paths["output_path_scheme"], auxdir / "cc_scheme.json")
+            protection_profiles = auxdir / "protection_profiles"
+            protection_profiles.mkdir()
+            os.symlink(paths["output_path_pp"], protection_profiles / "dataset.json")
+            maintenances = auxdir / "maintenances"
+            maintenances.mkdir()
+            os.symlink(paths["output_path_mu"], maintenances / "maintenance_updates.json")
+
+            os.symlink(paths["output_path"], tmpdir / "dataset.json")
+
+            certs = tmpdir / "certs"
+            certs.mkdir()
+            self.map_artifact_dir(ids, paths["report"], certs / "reports")
+            self.map_artifact_dir(ids, paths["target"], certs / "targets")
+            self.map_artifact_dir(ids, paths["cert"], certs / "certificates")
+
+            logger.info("Running tar...")
+            subprocess.run(["tar", "-hczvf", path, "."], cwd=tmpdir)
+            logger.info(f"Finished archiving {path}")
 
 
 @actor("cc_archive", "cc_archive", "updates", timedelta(hours=4))
-def archive(paths):  # pragma: no cover
+def archive(ids, paths):  # pragma: no cover
     archiver = CCArchiver()
-    archiver.archive(Path(current_app.instance_path) / current_app.config["DATASET_PATH_CC_ARCHIVE"], paths)
+    archiver.archive(ids, Path(current_app.instance_path) / current_app.config["DATASET_PATH_CC_ARCHIVE"], paths)
+
+
+@actor("cc_archive_all", "cc_archive_all", "updates", timedelta(hours=1))
+def archive_all():  # pragma: no cover
+    ids = list(map(lambda doc: doc["_id"], mongo.db.cc.find({}, {"_id": 1})))
+    updater = CCUpdater()
+    paths = updater.make_dataset_paths()
+    archive.send(ids, {name: str(path) for name, path in paths.items()})
 
 
 class CCUpdater(Updater, CCMixin):  # pragma: no cover
@@ -117,8 +206,8 @@ class CCUpdater(Updater, CCMixin):  # pragma: no cover
                     dset.analyze_certificates(update_json=False)
                 with sentry_sdk.start_span(op="cc.write_json", description="Write JSON"), suppress_child_spans():
                     dset.to_json(paths["output_path"])
-                    dset.auxiliary_datasets.scheme_dset.to_json(paths["output_path_scheme"])
-                    dset.auxiliary_datasets.mu_dset.to_json(paths["output_path_mu"])
+                    dset.aux_handlers[CCSchemeDatasetHandler].dset.to_json(paths["output_path_scheme"])
+                    dset.aux_handlers[CCMaintenanceUpdateDatasetHandler].dset.to_json(paths["output_path_mu"])
 
             with sentry_sdk.start_span(op="cc.move", description="Move files"), suppress_child_spans():
                 for cert in dset:
@@ -170,8 +259,8 @@ class CCUpdater(Updater, CCMixin):  # pragma: no cover
     def reindex(self, to_reindex):
         reindex_collection.send(list(to_reindex))
 
-    def archive(self, paths):
-        archive.send(paths)
+    def archive(self, ids, paths):
+        archive.send(ids, paths)
 
 
 @actor("cc_update", "cc_update", "updates", timedelta(hours=16))

@@ -1,10 +1,14 @@
-{% extends "base.html.jinja2" %}
+{% extends "common/base.html.jinja2" %}
 {% set crumbs = True %}
 {% set search = True %}
 {% from "cc/utils.html.jinja2" import render_pagination, render_plot %}
+{% block metadata %}
+    {{ super() }}
+    <meta name="robots" content="noindex"/>
+{% endblock %}
 {% block content %}
     <main>
-        <div class="col-10 mx-auto p-3 py-md-5">
+        <div class="col-12 col-sm-10 mx-auto p-3 py-md-5">
             <div class="alert alert-warning d-sm-none" role="alert">
                 <i class="fas fa-exclamation-triangle"></i> This page was not yet optimized for use on mobile devices.
             </div>
@@ -20,16 +24,15 @@
                             <button type="button" id="search-btn" class="btn btn-primary"><i class="fas fa-search"></i>
                                 Search
                             </button>
-                            <button type="button" id="network-btn" class="btn btn-warning"
-                                    title="Experimental feature: Display the references network of the resulting certificates."
-                                    data-bs-toggle="tooltip"><i
-                                    class="fas fa-flask fa-fw fa-spin"></i> Display network
+                            <button type="button" id="network-btn" class="btn btn-primary"
+                                    title="Display the references network of the resulting certificates."
+                                    data-bs-toggle="tooltip">Display network
                             </button>
                             <button id="extended-btn" class="btn btn-outline-primary" type="button"
                                     data-bs-toggle="collapse"
                                     data-bs-target="#extended"
                                     aria-controls="extended"
-                                    aria-expanded="false"><i
+                                    aria-expanded="{% if advanced %}true{% else %}false{% endif %}"><i
                                     class="fas fa-sliders"></i> Advanced options
                             </button>
                         </div>
@@ -39,7 +42,7 @@
                             and a hyphen-minus prefix to negate a match.</small><br/>
                         <small class="text-muted">E.g. <span class="font-monospace border rounded" onclick="window.getSelection().selectAllChildren(this)">Infineon Security Controller</span>.</small>
                     </div>
-                    <div id="extended" class="collapse mt-3">
+                    <div id="extended" class="collapse {% if advanced %}show{% endif %} mt-3">
                         <div id="categories" class="mb-3">
                             <h4>Categories
                                 <button id="cat-select-all" class="btn btn-outline-primary">Select all</button>
@@ -93,6 +96,16 @@
                                 </option>
                             </select>
                         </div>
+                        <div class="mt-3 mb-3">
+                            <h4><label for="search-scheme">Scheme</label></h4>
+                            <select id="search-scheme" class="form-control">
+                                <option value="any" {% if scheme == "any" %}selected="selected"{% endif %}>Any
+                                </option>
+                                {% for s in schemes|sort %}
+                                    <option value="{{ s }}" {% if scheme == s %}selected="selected"{% endif %}>{{ country_to_flag(s) }} {{ s }}</option>
+                                {% endfor %}
+                            </select>
+                        </div>
                     </div>
                 </div>
             </div>
@@ -100,8 +113,9 @@
                 function searchParams(additional) {
                     let status = $("#search-status").val();
                     let sort = $("#search-sort").val();
+                    let scheme = $("#search-scheme").val();
                     let categories = $.makeArray($("#search-categories input").filter(":checked").map((i, elem) => $(elem).data("id"))).join("");
-                    return $.param({q: $("#search").val(), cat: categories, status: status, sort: sort, ...additional});
+                    return $.param({q: $("#search").val(), cat: categories, status: status, sort: sort, scheme: scheme, ...additional});
                 }
 
                 function fullSearch() {
@@ -125,6 +139,7 @@
                 $("#search-categories input").change(quickSearch);
                 $("#search-status").change(quickSearch);
                 $("#search-sort").change(quickSearch);
+                $("#search-scheme").change(quickSearch);
                 $("#search").change(quickSearch);
                 $("#search").keyup(function (e) {
                     if (e.keyCode === 13) {

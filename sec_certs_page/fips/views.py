@@ -3,35 +3,34 @@
 import random
 from datetime import datetime
 from operator import itemgetter
-from pathlib import Path
 from urllib.parse import urlencode
 
 import pymongo
 import sentry_sdk
-from feedgen.feed import FeedGenerator
-from flask import Response, abort, current_app, redirect, render_template, request, send_file, url_for
+from flask import abort, current_app, redirect, render_template, request, url_for
 from flask_breadcrumbs import register_breadcrumb
 from flask_cachecontrol import cache_for
 from markupsafe import Markup
 from networkx import node_link_data
 from periodiq import cron
-from pytz import timezone
 from sec_certs import constants
 from werkzeug.exceptions import BadRequest
 from werkzeug.utils import safe_join
 
 from .. import cache, mongo, sitemap
-from ..common.diffs import render_compare
+from ..common.diffs import fips_diff_method, render_compare
+from ..common.feed import Feed
 from ..common.objformats import StorageFormat, load
 from ..common.views import (
     Pagination,
     entry_download_files,
     entry_download_target_pdf,
     entry_download_target_txt,
-    entry_file_path,
     expires_at,
     network_graph_func,
+    send_cacheable_instance_file,
     send_json_attachment,
+    sitemap_cert_pipeline,
 )
 from . import fips, fips_reference_types, fips_status, fips_types, get_fips_graphs, get_fips_map
 from .search import FIPSBasicSearch, FIPSFulltextSearch
@@ -77,27 +76,13 @@ def index():
 
 @fips.route("/dataset.json")
 def dataset():
-    dset_path = Path(current_app.instance_path) / current_app.config["DATASET_PATH_FIPS_OUT"]
-    if not dset_path.is_file():
-        return abort(404)
-    return send_file(
-        dset_path,
-        as_attachment=True,
-        mimetype="application/json",
-        download_name="dataset.json",
-    )
+    return send_cacheable_instance_file(current_app.config["DATASET_PATH_FIPS_OUT"], "application/json", "dataset.json")
 
 
 @fips.route("/fips.tar.gz")
 def dataset_archive():
-    archive_path = Path(current_app.instance_path) / current_app.config["DATASET_PATH_FIPS_ARCHIVE"]
-    if not archive_path.is_file():
-        return abort(404)
-    return send_file(
-        archive_path,
-        as_attachment=True,
-        mimetype="application/gzip",
-        download_name="fips.tar.gz",
+    return send_cacheable_instance_file(
+        current_app.config["DATASET_PATH_FIPS_ARCHIVE"], "application/gzip", "fips.tar.gz"
     )
 
 
@@ -181,10 +166,9 @@ def compare(one_hashid: str, other_hashid: str):
         return abort(404)
     doc_one = load(raw_one)
     doc_other = load(raw_other)
-    k1_order = ["cert_id", "web_data", "pdf_data", "state", "heuristics", "_type", "dgst"]
     return render_template(
         "common/compare.html.jinja2",
-        changes=render_compare(doc_one, doc_other, k1_order),
+        changes=render_compare(doc_one, doc_other, fips_diff_method),
         cert_one=doc_one,
         cert_other=doc_other,
         name_one=doc_one["web_data"]["module_name"],
@@ -513,48 +497,16 @@ def entry_json(hashid):
 
 @fips.route("/<string(length=16):hashid>/feed.xml")
 def entry_feed(hashid):
-    with sentry_sdk.start_span(op="mongo", description="Find cert"):
-        raw_doc = mongo.db.fips.find_one({"_id": hashid})
-    if raw_doc:
-        tz = timezone("Europe/Prague")
-        doc = load(raw_doc)
-        entry_url = url_for(".entry", hashid=hashid, _external=True)
-        renderer = FIPSRenderer()
-        with sentry_sdk.start_span(op="mongo", description="Find and render diffs"):
-            diffs = list(map(load, mongo.db.fips_diff.find({"dgst": hashid}, sort=[("timestamp", pymongo.ASCENDING)])))
-            diff_renders = list(map(lambda x: renderer.render_diff(hashid, doc, x, linkback=True), diffs))
-        fg = FeedGenerator()
-        fg.id(request.base_url)
-        fg.title(doc["web_data"]["module_name"] if doc["web_data"]["module_name"] is not None else str(doc["cert_id"]))
-        fg.author({"name": "sec-certs", "email": "webmaster@sec-certs.org"})
-        fg.link({"href": entry_url, "rel": "alternate"})
-        fg.link({"href": request.base_url, "rel": "self"})
-        fg.icon(url_for("static", filename="img/favicon.png", _external=True))
-        fg.logo(url_for("static", filename="img/fips_card.png", _external=True))
-        fg.language("en")
-        last_update = None
-        for diff, render in zip(diffs, diff_renders):
-            date = tz.localize(diff["timestamp"])
-            fe = fg.add_entry()
-            fe.author({"name": "sec-certs", "email": "webmaster@sec-certs.org"})
-            fe.title(
-                {
-                    "back": "Certificate reappeared",
-                    "change": "Certificate changed",
-                    "new": "New certificate",
-                    "remove": "Certificate removed",
-                }[diff["type"]]
-            )
-            fe.id(entry_url + "/" + str(diff["_id"]))
-            fe.content(str(render), type="html")
-            fe.published(date)
-            fe.updated(date)
-            if last_update is None or date > last_update:
-                last_update = date
-
-        fg.lastBuildDate(last_update)
-        fg.updated(last_update)
-        return Response(fg.atom_str(pretty=True), mimetype="application/atom+xml")
+    feed = Feed(
+        FIPSRenderer(),
+        "img/fips_card.png",
+        mongo.db.fips,
+        mongo.db.fips_diff,
+        lambda doc: doc["web_data"]["module_name"] if doc["web_data"]["module_name"] else str(doc["cert_id"]),
+    )
+    response = feed.render(hashid)
+    if response:
+        return response
     else:
         return abort(404)
 
@@ -585,7 +537,7 @@ def entry_name(name):
 
 @sitemap.register_generator
 def sitemap_urls():
-    yield "fips.index", {}
+    yield "fips.index", {}, None, None, 0.9
     yield "fips.dataset", {}
     yield "fips.network", {}
     yield "fips.analysis", {}
@@ -594,9 +546,9 @@ def sitemap_urls():
     yield "fips.rand", {}
     yield "fips.mip_index", {}
     yield "fips.iut_index", {}
-    for doc in mongo.db.fips.find({}, {"_id": 1}):
-        yield "fips.entry", {"hashid": doc["_id"]}
+    for doc in mongo.db.fips.aggregate(sitemap_cert_pipeline("fips"), allowDiskUse=True):
+        yield "fips.entry", {"hashid": doc["_id"]}, doc["timestamp"].strftime("%Y-%m-%d"), "weekly", 0.8
     for doc in mongo.db.fips_mip.find({}, {"_id": 1}):
-        yield "fips.mip_snapshot", {"id": doc["_id"]}
+        yield "fips.mip_snapshot", {"id": doc["_id"]}, None, None, 0.6
     for doc in mongo.db.fips_iut.find({}, {"_id": 1}):
-        yield "fips.iut_snapshot", {"id": doc["_id"]}
+        yield "fips.iut_snapshot", {"id": doc["_id"]}, None, None, 0.6
