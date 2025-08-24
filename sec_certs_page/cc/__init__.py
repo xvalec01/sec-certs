@@ -164,5 +164,4 @@ def get_cc_analysis():
 
 
 from .commands import *
-from .dash import *
 from .views import *
