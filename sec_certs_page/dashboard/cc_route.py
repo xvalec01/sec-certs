@@ -125,8 +125,24 @@ def register_pages(app: Dash, cc_graph_registry: ChartRegistry) -> None:
     except Exception as e:
         print(f"Warning: Could not register chart callbacks: {e}")
 
-    # NOTE: Filter store callback removed - will be added when filters are integrated with charts
-    # For now, filters are just UI components without backend filtering logic
+    # Register filter store callback to collect all filter values
+    from sec_certs_page.dashboard.filters.factory import DashCallbackHelper
+
+    # Create callback inputs for all filters
+    filter_inputs = DashCallbackHelper.create_callback_inputs()
+
+    if filter_inputs:
+        @app.callback(
+            Output("cc-filter-store", "data"),
+            filter_inputs,
+            prevent_initial_call=False,
+        )
+        def update_filter_store(*filter_values) -> dict:
+            """Collect all filter values into a store for charts to use."""
+            from sec_certs_page.dashboard.filters.registry import CCFilterRegistry
+
+            filters = DashCallbackHelper.collect_filter_values(*filter_values, filter_registry=CCFilterRegistry)
+            return filters
 
     # Add chart accumulation callbacks using Store pattern
     @app.callback(

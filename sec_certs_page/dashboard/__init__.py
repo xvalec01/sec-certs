@@ -37,8 +37,23 @@ def init_dashboard(app: Flask, csrf: CSRFProtect) -> None:
     # Initialize core services
     data_service = DataService(mongo)
 
-    # Initialize filter registry with data service
-    CCFilterRegistry.initialize_filters(data_service)
+    # Load filter options from database
+    filter_options = {}
+    for filter_id, filter_spec in CCFilterRegistry._filters.items():
+        if filter_spec.lazy_load_options:
+            try:
+                options = data_service.get_distinct_values_with_labels(
+                    field=filter_spec.mongodb_field,
+                    dataset_type="cc",
+                    label_map=filter_spec.label_map,
+                )
+                filter_options[filter_id] = options
+            except Exception as e:
+                print(f"WARNING: Failed to load options for {filter_id}: {e}")
+                filter_options[filter_id] = []
+
+    # Initialize filter registry with loaded options
+    CCFilterRegistry.initialize_filters(filter_options)
 
     # Create registries
     cc_chart_registry = ChartRegistry()
